@@ -1,0 +1,60 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: scans
+// Document ID: auto-generated
+// Fields:
+//   - code: string (required) - The scanned barcode or QR code
+//   - type: string (required, 'IN' or 'OUT') - Operation type
+//   - timestamp: timestamp (required) - When the scan occurred
+//   - userId: string (required) - The user who performed the scan
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    
+    function isValidScan(data) {
+      return hasOnlyAllowedFields(['code', 'type', 'timestamp', 'userId']) &&
+             data.code is string && data.code.size() > 0 && data.code.size() < 1000 &&
+             data.type in ['IN', 'OUT'] &&
+             data.timestamp is timestamp &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100;
+    }
+
+    match /scans/{scanId} {
+      // Users can read their own scans
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      
+      // Users can create scans for themselves
+      allow create: if isAuthenticated() && 
+                    isValidScan(request.resource.data) && 
+                    request.resource.data.userId == request.auth.uid;
+                    
+      // Scans are immutable once created (no updates allowed)
+      allow update: if false;
+      
+      // Scans cannot be deleted
+      allow delete: if false;
+    }
+  }
+}

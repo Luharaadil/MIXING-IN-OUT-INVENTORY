@@ -1,0 +1,5 @@
+{
+  "name": "MIXING IN-OUT INVENTORY",
+  "description": "A web app to scan QR codes and barcodes (via camera or hardware scanner) and track IN/OUT inventory.",
+  "requestFramePermissions": ["camera"]
+}

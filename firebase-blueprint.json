@@ -1,0 +1,38 @@
+{
+  "entities": {
+    "Scan": {
+      "title": "Scan",
+      "description": "A barcode or QR code scan record",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "The scanned barcode or QR code"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["IN", "OUT"],
+          "description": "Whether the scan was an IN or OUT operation"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the scan occurred"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The user who performed the scan"
+        }
+      },
+      "required": ["code", "type", "timestamp", "userId"]
+    }
+  },
+  "firestore": {
+    "/scans/{scanId}": {
+      "schema": {
+        "$ref": "#/entities/Scan"
+      },
+      "description": "Collection of all scans"
+    }
+  }
+}
