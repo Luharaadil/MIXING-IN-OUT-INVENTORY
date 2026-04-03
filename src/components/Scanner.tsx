@@ -26,7 +26,26 @@ export default function Scanner() {
   const [area, setArea] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [scanModal, setScanModal] = useState<{message: string, isError: boolean} | null>(null);
+  const [todayScans, setTodayScans] = useState<{code: string, type: ScanType}[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch today's scans for duplicate checking
+  useEffect(() => {
+    const fetchTodayScans = async () => {
+      try {
+        const dateStr = format(new Date(), 'yyyy-MM-dd');
+        const response = await fetch(`${SCRIPT_URL}?date=${dateStr}`);
+        if (response.ok) {
+          const data = await response.json();
+          setTodayScans(data.scans || []);
+        }
+      } catch (error) {
+        console.error('Failed to fetch today scans:', error);
+      }
+    };
+    fetchTodayScans();
+  }, []);
 
   // Initialize Camera Scanner
   useEffect(() => {
@@ -64,7 +83,7 @@ export default function Scanner() {
   }, [scanType, weight, area]);
 
   const handleScan = async (code: string) => {
-    if (!code.trim() || isSubmitting) return false;
+    if (!code.trim() || isSubmitting || scanModal) return false;
 
     const currentType = scanTypeRef.current;
     const currentWeight = weightRef.current;
@@ -76,9 +95,15 @@ export default function Scanner() {
       if (!currentArea.trim()) missing.push('area');
       
       if (missing.length > 0) {
-        alert(`Please provide ${missing.join(' and ')} for IN material.`);
+        setScanModal({ message: `Please provide ${missing.join(' and ')} for IN material.`, isError: true });
         return false;
       }
+    }
+
+    const isDuplicate = todayScans.some(s => s.code === code.trim() && s.type === currentType);
+    if (isDuplicate) {
+      setScanModal({ message: `Barcode ${code.trim()} is already marked as ${currentType}.`, isError: true });
+      return false;
     }
 
     const now = new Date();
@@ -108,13 +133,22 @@ export default function Scanner() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       
-      setLastScan({ 
-        code: code.trim(), 
-        type: currentType, 
-        time: now,
-        weight: currentWeight,
-        area: currentArea
-      });
+      setTodayScans(prev => [...prev, { code: code.trim(), type: currentType }]);
+      
+      if (scannerMode === 'CAMERA') {
+        const msg = currentType === 'IN' 
+          ? `${code.trim()} and ${currentWeight || '0'} of this material in inward in this ${currentArea || 'area'} successfully`
+          : `out ${code.trim()} successful`;
+        setScanModal({ message: msg, isError: false });
+      } else {
+        setLastScan({ 
+          code: code.trim(), 
+          type: currentType, 
+          time: now,
+          weight: currentWeight,
+          area: currentArea
+        });
+      }
       
       // Clear weight and area after successful IN scan
       if (currentType === 'IN') {
@@ -125,11 +159,11 @@ export default function Scanner() {
       return true;
     } catch (error: any) {
       console.error('Error saving scan:', error);
-      if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
-        setErrorMsg('Failed to connect to Google Sheets. Please ensure the Apps Script is deployed with "Who has access: Anyone".');
-      } else {
-        setErrorMsg(`Failed to save scan: ${error.message}`);
-      }
+      const msg = error.message === 'Failed to fetch' || error.message.includes('NetworkError')
+        ? 'Failed to connect to Google Sheets. Please ensure the Apps Script is deployed with "Who has access: Anyone".'
+        : `Failed to save scan: ${error.message}`;
+      
+      setScanModal({ message: msg, isError: true });
       return false;
     } finally {
       setIsSubmitting(false);
@@ -285,7 +319,7 @@ export default function Scanner() {
       )}
 
       {/* Last Scan Status */}
-      {lastScan && !errorMsg && (
+      {lastScan && !errorMsg && scannerMode === 'HARDWARE' && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-start gap-3 animate-in fade-in slide-in-from-bottom-4">
           <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
           <div>
@@ -298,6 +332,29 @@ export default function Scanner() {
             <p className="text-xs text-green-600/80 mt-1">
               {lastScan.time.toLocaleTimeString()}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Modal */}
+      {scanModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6 space-y-4 text-center animate-in zoom-in-95">
+            <div className={cn("mx-auto w-12 h-12 rounded-full flex items-center justify-center", scanModal.isError ? "bg-red-100 text-red-600" : "bg-green-100 text-green-600")}>
+              {scanModal.isError ? <AlertTriangle className="w-6 h-6" /> : <CheckCircle2 className="w-6 h-6" />}
+            </div>
+            <h3 className="text-lg font-bold text-gray-900">
+              {scanModal.isError ? 'Attention' : 'Success'}
+            </h3>
+            <p className="text-gray-600 text-sm">
+              {scanModal.message}
+            </p>
+            <button
+              onClick={() => setScanModal(null)}
+              className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
+            >
+              OK
+            </button>
           </div>
         </div>
       )}
