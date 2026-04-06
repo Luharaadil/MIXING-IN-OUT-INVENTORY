@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { format, parseISO, differenceInDays } from 'date-fns';
-import { Calendar, ArrowDownRight, ArrowUpRight, Clock, AlertTriangle, Filter } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { format, parseISO, differenceInDays, addDays, startOfDay, addHours } from 'date-fns';
+import { Calendar, ArrowDownRight, ArrowUpRight, Clock, AlertTriangle, Filter, BarChart3, List, Copy } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { toPng } from 'html-to-image';
 
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby69O24mOHRe6-V6EnwPR3u1HiY6MG1md8c0RjiGb5T5S5rE1omhj7_zObD8uqBMQDUww/exec';
 
@@ -16,8 +17,9 @@ interface ScanData {
 }
 
 export default function Summary() {
-  const [startDate, setStartDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
-  const [endDate, setEndDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
+  const [startDateTime, setStartDateTime] = useState<string>(format(addHours(startOfDay(new Date()), 7), 'yyyy-MM-dd\'T\'HH:mm'));
+  const [endDateTime, setEndDateTime] = useState<string>(format(addHours(startOfDay(addDays(new Date(), 1)), 7), 'yyyy-MM-dd\'T\'HH:mm'));
+  const [viewMode, setViewMode] = useState<'LIST' | 'SUMMARY'>('LIST');
   const [scans, setScans] = useState<ScanData[]>([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -26,26 +28,33 @@ export default function Summary() {
   const [filterArea, setFilterArea] = useState('');
   const [filterType, setFilterType] = useState<'' | 'IN' | 'OUT'>('');
 
+  const getScanDetails = (code: string) => {
+    const parts = code.split('-');
+    const rubberName = parts[0] || '';
+    const lotNumber = parts[1] || '';
+    const batchStart = parseInt(parts[2] || '0');
+    const batchEnd = parseInt(parts[3] || '0');
+    const batchCount = batchEnd - batchStart + 1;
+    return { rubberName, lotNumber, batchCount };
+  };
+
   useEffect(() => {
     const fetchScans = async () => {
-      if (!startDate || !endDate) return;
+      if (!startDateTime || !endDateTime) return;
 
-      const start = parseISO(startDate);
-      const end = parseISO(endDate);
+      const start = parseISO(startDateTime);
+      const end = parseISO(endDateTime);
       
       if (start > end) {
-        setErrorMsg("Start date cannot be after end date.");
+        setErrorMsg("Start time cannot be after end time.");
         return;
       }
       
-      if (differenceInDays(end, start) > 31) {
-        setErrorMsg("Please select a date range of 31 days or less.");
-        return;
-      }
-
       setLoading(true);
       setErrorMsg(null);
       try {
+        // For simplicity in this implementation, we fetch data for the date range
+        // and filter by time client-side.
         const datesToFetch = [];
         let currentDate = new Date(start);
         while (currentDate <= end) {
@@ -55,7 +64,6 @@ export default function Summary() {
 
         const allScans: ScanData[] = [];
         
-        // Fetch all dates in parallel
         const promises = datesToFetch.map(async (dateStr) => {
           const response = await fetch(`${SCRIPT_URL}?date=${dateStr}`, {
             method: 'GET',
@@ -73,21 +81,23 @@ export default function Summary() {
         const results = await Promise.all(promises);
         results.forEach(scans => allScans.push(...scans));
 
+        // Filter by exact time range
+        const filteredByTime = allScans.filter(scan => {
+          const scanDateTime = parseISO(`${scan.date}T${scan.time}`);
+          return scanDateTime >= start && scanDateTime <= end;
+        });
+
         // Sort descending by date and time
-        allScans.sort((a, b) => {
+        filteredByTime.sort((a, b) => {
           const strA = `${a.date} ${a.time}`;
           const strB = `${b.date} ${b.time}`;
           return strB.localeCompare(strA);
         });
 
-        setScans(allScans);
+        setScans(filteredByTime);
       } catch (error: any) {
         console.error('Error fetching scans:', error);
-        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
-          setErrorMsg('Failed to connect to Google Sheets. This usually means the Apps Script is not deployed with "Who has access: Anyone". Please redeploy the script and ensure "Anyone" is selected.');
-        } else {
-          setErrorMsg(`Error loading data: ${error.message}`);
-        }
+        setErrorMsg(`Error loading data: ${error.message}`);
         setScans([]);
       } finally {
         setLoading(false);
@@ -95,100 +105,113 @@ export default function Summary() {
     };
 
     fetchScans();
-  }, [startDate, endDate]);
-
-  const totalIn = scans.filter(s => s.type === 'IN').length;
-  const totalOut = scans.filter(s => s.type === 'OUT').length;
+  }, [startDateTime, endDateTime]);
 
   const filteredScans = scans.filter(scan => {
-    const parts = scan.code.split('-');
-    const rubberName = parts[0] || '';
-    const batchNumber = parts[1] || '';
+    const { rubberName, lotNumber } = getScanDetails(scan.code);
     const area = scan.area || '';
     
     const matchRubber = filterRubber ? rubberName.toLowerCase().includes(filterRubber.toLowerCase()) : true;
-    const matchBatch = filterBatch ? batchNumber.toLowerCase().includes(filterBatch.toLowerCase()) : true;
+    const matchBatch = filterBatch ? lotNumber.toLowerCase().includes(filterBatch.toLowerCase()) : true;
     const matchArea = filterArea ? area.toLowerCase().includes(filterArea.toLowerCase()) : true;
     const matchType = filterType ? scan.type === filterType : true;
     
     return matchRubber && matchBatch && matchArea && matchType;
   });
 
+  const totalIn = filteredScans.filter(s => s.type === 'IN').length;
+  const totalOut = filteredScans.filter(s => s.type === 'OUT').length;
+
+  const rubberSummary = filteredScans.reduce((acc, scan) => {
+    const { rubberName, batchCount } = getScanDetails(scan.code);
+    acc[rubberName] = (acc[rubberName] || 0) + batchCount;
+    return acc;
+  }, {} as Record<string, number>);
+
+  const summaryRef = useRef<HTMLDivElement>(null);
+
+  const handleCopyPicture = async () => {
+    if (summaryRef.current) {
+      try {
+        const dataUrl = await toPng(summaryRef.current, { backgroundColor: '#ffffff' });
+        const blob = await (await fetch(dataUrl)).blob();
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]);
+        alert('Summary copied to clipboard!');
+      } catch (error) {
+        console.error('Error copying picture:', error);
+        alert('Failed to copy picture.');
+      }
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-4 space-y-6">
-      {/* Date Picker */}
+      {/* Date/Time Picker */}
       <div className="bg-white rounded-xl shadow-sm border p-4 flex flex-col sm:flex-row items-center gap-4">
         <div className="flex-1 w-full">
-          <label className="block text-xs font-medium text-gray-500 mb-1">Start Date</label>
-          <div className="flex items-center gap-2 border rounded-lg px-3 py-2">
-            <Calendar className="w-4 h-4 text-gray-400" />
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full text-gray-900 font-medium outline-none bg-transparent text-sm"
-            />
-          </div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Start Time</label>
+          <input
+            type="datetime-local"
+            value={startDateTime}
+            onChange={(e) => setStartDateTime(e.target.value)}
+            className="w-full border rounded-lg px-3 py-2 text-sm outline-none"
+          />
         </div>
         <div className="flex-1 w-full">
-          <label className="block text-xs font-medium text-gray-500 mb-1">End Date</label>
-          <div className="flex items-center gap-2 border rounded-lg px-3 py-2">
-            <Calendar className="w-4 h-4 text-gray-400" />
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full text-gray-900 font-medium outline-none bg-transparent text-sm"
-            />
-          </div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">End Time</label>
+          <input
+            type="datetime-local"
+            value={endDateTime}
+            onChange={(e) => setEndDateTime(e.target.value)}
+            className="w-full border rounded-lg px-3 py-2 text-sm outline-none"
+          />
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="bg-white rounded-xl shadow-sm border p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Filter Type</label>
-          <select
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value as '' | 'IN' | 'OUT')}
-            className="w-full px-3 py-2 border rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm bg-white"
-          >
-            <option value="">All</option>
-            <option value="IN">IN</option>
-            <option value="OUT">OUT</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Filter Rubber Name</label>
-          <input
-            type="text"
-            value={filterRubber}
-            onChange={(e) => setFilterRubber(e.target.value)}
-            placeholder="e.g. 0022NP"
-            className="w-full px-3 py-2 border rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Filter Batch No.</label>
-          <input
-            type="text"
-            value={filterBatch}
-            onChange={(e) => setFilterBatch(e.target.value)}
-            placeholder="e.g. 2903266307"
-            className="w-full px-3 py-2 border rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Filter Area</label>
-          <input
-            type="text"
-            value={filterArea}
-            onChange={(e) => setFilterArea(e.target.value)}
-            placeholder="e.g. M-B-1"
-            className="w-full px-3 py-2 border rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-          />
-        </div>
+      {/* View Toggle */}
+      <div className="flex bg-gray-200 p-1 rounded-lg">
+        <button 
+          onClick={() => setViewMode('LIST')}
+          className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'LIST' ? "bg-white shadow text-blue-600" : "text-gray-600")}
+        >
+          <List className="w-4 h-4" /> List View
+        </button>
+        <button 
+          onClick={() => setViewMode('SUMMARY')}
+          className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'SUMMARY' ? "bg-white shadow text-blue-600" : "text-gray-600")}
+        >
+          <BarChart3 className="w-4 h-4" /> Rubber Summary
+        </button>
       </div>
+
+      {/* Filters (only in List View) */}
+      {viewMode === 'LIST' && (
+        <div className="bg-white rounded-xl shadow-sm border p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {/* ... filters ... */}
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Type</label>
+            <select value={filterType} onChange={(e) => setFilterType(e.target.value as '' | 'IN' | 'OUT')} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
+              <option value="">All</option>
+              <option value="IN">IN</option>
+              <option value="OUT">OUT</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Rubber</label>
+            <input type="text" value={filterRubber} onChange={(e) => setFilterRubber(e.target.value)} placeholder="e.g. 0022NP" className="w-full px-3 py-2 border rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Batch</label>
+            <input type="text" value={filterBatch} onChange={(e) => setFilterBatch(e.target.value)} placeholder="e.g. 2903266307" className="w-full px-3 py-2 border rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Area</label>
+            <input type="text" value={filterArea} onChange={(e) => setFilterArea(e.target.value)} placeholder="e.g. M-B-1" className="w-full px-3 py-2 border rounded-lg text-sm" />
+          </div>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
@@ -223,59 +246,72 @@ export default function Summary() {
         </div>
       </div>
 
-      {/* Scans List */}
+      {/* Scans List / Summary */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="px-4 py-3 border-b bg-gray-50/50 flex items-center justify-between">
-          <h3 className="font-medium text-gray-800">Scan History</h3>
-          <span className="text-xs bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full">{filteredScans.length} records</span>
-        </div>
-        
-        <div className="overflow-x-auto">
-          {loading ? (
-            <div className="p-8 text-center text-gray-500">Loading...</div>
-          ) : filteredScans.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">No scans found matching your criteria.</div>
-          ) : (
-            <table className="w-full text-sm text-left whitespace-nowrap">
-              <thead className="text-xs text-gray-500 bg-gray-50 uppercase border-b">
-                <tr>
-                  <th className="px-4 py-3 font-medium">Type</th>
-                  <th className="px-4 py-3 font-medium">Rubber</th>
-                  <th className="px-4 py-3 font-medium">Barcode</th>
-                  <th className="px-4 py-3 font-medium">Weight</th>
-                  <th className="px-4 py-3 font-medium">Area</th>
-                  <th className="px-4 py-3 font-medium">Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {filteredScans.map((scan, index) => {
-                  const parts = scan.code.split('-');
-                  const rubberName = parts[0] || '-';
-                  
-                  return (
-                    <tr key={scan.id || index} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className={cn(
-                          "px-2 py-1 rounded text-[10px] font-bold",
-                          scan.type === 'IN' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
-                        )}>
-                          {scan.type}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 font-medium text-gray-900">{rubberName}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{scan.code}</td>
-                      <td className="px-4 py-3 text-gray-700">{scan.weight || '-'}</td>
-                      <td className="px-4 py-3 text-gray-700">{scan.area || '-'}</td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">
-                        {scan.date} <br/> {scan.time}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
+        {viewMode === 'LIST' ? (
+          <div className="overflow-x-auto">
+            {loading ? (
+              <div className="p-8 text-center text-gray-500">Loading...</div>
+            ) : filteredScans.length === 0 ? (
+              <div className="p-8 text-center text-gray-500">No scans found matching your criteria.</div>
+            ) : (
+              <table className="w-full text-sm text-left whitespace-nowrap">
+                <thead className="text-xs text-gray-500 bg-gray-50 uppercase border-b">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">Type</th>
+                    <th className="px-4 py-3 font-medium">Rubber</th>
+                    <th className="px-4 py-3 font-medium">Barcode</th>
+                    <th className="px-4 py-3 font-medium">Weight</th>
+                    <th className="px-4 py-3 font-medium">Area</th>
+                    <th className="px-4 py-3 font-medium">Time</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {filteredScans.map((scan, index) => {
+                    const { rubberName } = getScanDetails(scan.code);
+                    return (
+                      <tr key={scan.id || index} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3">
+                          <span className={cn("px-2 py-1 rounded text-[10px] font-bold", scan.type === 'IN' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>
+                            {scan.type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 font-medium text-gray-900">{rubberName}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-600">{scan.code}</td>
+                        <td className="px-4 py-3 text-gray-700">{scan.weight || '-'}</td>
+                        <td className="px-4 py-3 text-gray-700">{scan.area || '-'}</td>
+                        <td className="px-4 py-3 text-gray-500 text-xs">{scan.date} <br/> {scan.time}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        ) : (
+          <div className="p-4" ref={summaryRef}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-medium text-gray-800">Rubber Batch Summary</h3>
+              <button 
+                onClick={handleCopyPicture}
+                className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+              >
+                <Copy className="w-3 h-3" /> Copy Picture
+              </button>
+            </div>
+            <div className="space-y-2">
+              {Object.entries(rubberSummary).map(([rubber, count]) => (
+                <div key={rubber} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                  <span className="font-medium text-gray-900">{rubber}</span>
+                  <span className="font-bold text-blue-600">{count}</span>
+                </div>
+              ))}
+              {Object.keys(rubberSummary).length === 0 && (
+                <div className="text-center text-gray-500 py-4">No data available.</div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
