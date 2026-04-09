@@ -98,27 +98,48 @@ export default function Summary() {
           const workbook = XLSX.read(buffer);
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet) as any[];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+          
+          // Data starts at row 4 (index 3) according to the image
+          const dataRows = jsonData.slice(3);
 
-          const mappedScans: ScanData[] = jsonData.map((row, index) => {
-            // Try to find columns by common names
-            const code = row.Barcode || row.barcode || row.Code || row.code || row.BARCODE || '';
-            const type = (row.Type || row.type || row.TYPE || 'IN').toUpperCase() as 'IN' | 'OUT';
-            const date = row.Date || row.date || row.DATE || '';
-            const time = row.Time || row.time || row.TIME || '';
-            const weight = row.Weight || row.weight || row.WEIGHT || '';
-            const area = row.Area || row.area || row.AREA || '';
+          const mappedScans: ScanData[] = dataRows
+            .filter(row => row && row[1]) // Ensure row exists and has a barcode in column B
+            .map((row, index) => {
+              const code = String(row[1] || '').trim().toUpperCase();
+              const weight = String(row[2] || '').trim();
+              // Column 5 (Index 4) is Rubber Name (recipe_name)
+              // Column 7 (Index 6) or Column 6 (Index 5) for time
+              const rawTime = String(row[6] || row[5] || '').trim();
+              
+              let date = format(new Date(), 'yyyy-MM-dd');
+              let time = '00:00';
+              
+              if (rawTime) {
+                // Handle YYYY/MM/DD HH:mm format seen in image
+                if (rawTime.includes(' ')) {
+                  const [d, t] = rawTime.split(' ');
+                  date = d.replace(/\//g, '-');
+                  time = t;
+                } else if (rawTime.includes('T')) {
+                  const [d, t] = rawTime.split('T');
+                  date = d;
+                  time = t.split('.')[0];
+                } else {
+                  time = rawTime;
+                }
+              }
 
-            return {
-              id: `local-${index}`,
-              code: String(code),
-              type: type === 'OUT' ? 'OUT' : 'IN',
-              date: String(date),
-              time: String(time),
-              weight: String(weight),
-              area: String(area)
-            };
-          });
+              return {
+                id: `local-${index}`,
+                code: code,
+                type: 'IN', // Assuming these are IN records based on the "Usage" context
+                date: date,
+                time: time,
+                weight: weight,
+                area: '' 
+              };
+            });
 
           // Filter by time range if dates are valid
           const filteredLocal = mappedScans.filter(scan => {
@@ -228,13 +249,30 @@ export default function Summary() {
   const totalIn = filteredScans.filter(s => s.type === 'IN').length;
   const totalOut = filteredScans.filter(s => s.type === 'OUT').length;
 
-  const rubberSummary = filteredScans.reduce((acc, scan) => {
+  const inventorySummary = filteredScans.reduce((acc, scan) => {
     const { rubberName, batchCount } = getScanDetails(scan.code);
-    acc[rubberName] = (acc[rubberName] || 0) + batchCount;
+    if (!acc[rubberName]) {
+      acc[rubberName] = { in: 0, out: 0, balance: 0, barcodes: [] as { code: string; weight?: string; date: string }[] };
+    }
+    
+    if (scan.type === 'IN') {
+      acc[rubberName].in += batchCount;
+      acc[rubberName].balance += batchCount;
+      acc[rubberName].barcodes.push({ code: scan.code, weight: scan.weight, date: scan.date });
+    } else {
+      acc[rubberName].out += batchCount;
+      acc[rubberName].balance -= batchCount;
+      // When OUT, we remove the corresponding IN barcode if it exists in the list
+      const idx = acc[rubberName].barcodes.findIndex(b => b.code === scan.code);
+      if (idx !== -1) {
+        acc[rubberName].barcodes.splice(idx, 1);
+      }
+    }
     return acc;
-  }, {} as Record<string, number>);
+  }, {} as Record<string, { in: number; out: number; balance: number; barcodes: { code: string; weight?: string; date: string }[] }>);
 
   const summaryRef = useRef<HTMLDivElement>(null);
+  const [expandedRubber, setExpandedRubber] = useState<string | null>(null);
 
   const handleCopyPicture = async () => {
     if (summaryRef.current) {
@@ -495,24 +533,83 @@ export default function Summary() {
           </div>
         ) : (
           <div className="p-4" ref={summaryRef}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-medium text-gray-800">Rubber Batch Summary</h3>
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="font-bold text-lg text-gray-800">Inventory Summary</h3>
+                <p className="text-xs text-gray-500">Remaining stock by rubber type</p>
+              </div>
               <button 
                 onClick={handleCopyPicture}
-                className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium bg-blue-50 px-3 py-1.5 rounded-lg transition-colors"
               >
                 <Copy className="w-3 h-3" /> Copy Picture
               </button>
             </div>
-            <div className="space-y-2">
-              {Object.entries(rubberSummary).map(([rubber, count]) => (
-                <div key={rubber} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                  <span className="font-medium text-gray-900">{rubber}</span>
-                  <span className="font-bold text-blue-600">{count}</span>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-4 text-[10px] font-bold text-gray-400 uppercase px-4 mb-1">
+                <div className="col-span-1">Rubber Name</div>
+                <div className="text-center">Total IN</div>
+                <div className="text-center">Total OUT</div>
+                <div className="text-right">Balance</div>
+              </div>
+
+              {Object.entries(inventorySummary).map(([rubber, data]) => {
+                const inv = data as { in: number; out: number; balance: number; barcodes: { code: string; weight?: string; date: string }[] };
+                return (
+                  <div key={rubber} className="border rounded-xl overflow-hidden bg-white shadow-sm">
+                    <div 
+                      onClick={() => setExpandedRubber(expandedRubber === rubber ? null : rubber)}
+                      className={cn(
+                        "grid grid-cols-4 items-center p-4 cursor-pointer hover:bg-gray-50 transition-colors",
+                        expandedRubber === rubber && "bg-blue-50/30"
+                      )}
+                    >
+                      <div className="col-span-1 font-bold text-gray-900 flex items-center gap-2">
+                        <div className={cn("w-1.5 h-1.5 rounded-full", inv.balance > 0 ? "bg-green-500" : "bg-gray-300")} />
+                        {rubber}
+                      </div>
+                      <div className="text-center text-sm font-medium text-green-600">+{inv.in}</div>
+                      <div className="text-center text-sm font-medium text-red-600">-{inv.out}</div>
+                      <div className="text-right text-base font-black text-blue-700">{inv.balance}</div>
+                    </div>
+
+                    {expandedRubber === rubber && (
+                      <div className="bg-gray-50 border-t p-4 space-y-3">
+                        <div className="flex justify-between items-center border-b pb-2">
+                          <h4 className="text-xs font-bold text-gray-600 uppercase">Remaining Barcodes</h4>
+                          <span className="text-[10px] bg-white px-2 py-0.5 rounded border text-gray-500">
+                            {inv.barcodes.length} items
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
+                          {inv.barcodes.length > 0 ? (
+                            inv.barcodes.map((b, i) => (
+                              <div key={i} className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-gray-100 shadow-sm text-xs">
+                                <div className="flex flex-col">
+                                  <span className="font-mono font-bold text-gray-800">{b.code}</span>
+                                  <span className="text-[10px] text-gray-400">{b.date}</span>
+                                </div>
+                                <div className="text-right">
+                                  <span className="font-bold text-blue-600">{b.weight || '-'} kg</span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-center py-4 text-xs text-gray-400 italic">No remaining barcodes in inventory</div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              
+              {Object.keys(inventorySummary).length === 0 && (
+                <div className="text-center text-gray-500 py-12 bg-gray-50 rounded-xl border-2 border-dashed">
+                  <FileSpreadsheet className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                  <p className="text-sm">No inventory data available for the selected period.</p>
                 </div>
-              ))}
-              {Object.keys(rubberSummary).length === 0 && (
-                <div className="text-center text-gray-500 py-4">No data available.</div>
               )}
             </div>
           </div>
