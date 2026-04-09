@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { format, parseISO, differenceInDays, addDays, startOfDay, addHours } from 'date-fns';
-import { Calendar, ArrowDownRight, ArrowUpRight, Clock, AlertTriangle, Filter, BarChart3, List, Copy } from 'lucide-react';
+import { Calendar, ArrowDownRight, ArrowUpRight, Clock, AlertTriangle, Filter, BarChart3, List, Copy, FileSpreadsheet } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { toPng } from 'html-to-image';
+import * as XLSX from 'xlsx';
 
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby69O24mOHRe6-V6EnwPR3u1HiY6MG1md8c0RjiGb5T5S5rE1omhj7_zObD8uqBMQDUww/exec';
 
@@ -28,6 +29,9 @@ export default function Summary() {
   const [filterArea, setFilterArea] = useState('');
   const [filterType, setFilterType] = useState<'' | 'IN' | 'OUT'>('');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [dataSource, setDataSource] = useState<'CLOUD' | 'LOCAL'>('CLOUD');
+  const [fileHandle, setFileHandle] = useState<any>(null);
 
   const getScanDetails = (code: string) => {
     const parts = code.toUpperCase().split('-');
@@ -39,28 +43,116 @@ export default function Summary() {
     return { rubberName, lotNumber, batchCount };
   };
 
-  useEffect(() => {
-    const fetchScans = async () => {
-      if (!startDateTime || !endDateTime) return;
+  const parseScanDateTime = (dateStr: string, timeStr: string) => {
+    try {
+      if (!dateStr || !timeStr) return null;
 
-      const start = parseISO(startDateTime);
-      const end = parseISO(endDateTime);
-      
-      if (start > end) {
-        setErrorMsg("Start time cannot be after end time.");
-        return;
+      let normalizedDate = dateStr;
+      if (normalizedDate.includes('/')) {
+        const parts = normalizedDate.split('/');
+        // Handle DD/MM/YYYY or YYYY/MM/DD
+        if (parts[0].length === 2 && parts[2].length === 4) {
+          normalizedDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
+        } else if (parts[0].length === 4) {
+          normalizedDate = `${parts[0]}-${parts[1]}-${parts[2]}`;
+        }
       }
       
+      let cleanTime = timeStr.trim();
+      
+      // Handle Excel time numbers (e.g. "0.2916666666666667" for 7:00 AM)
+      if (!isNaN(Number(cleanTime)) && Number(cleanTime) < 1 && Number(cleanTime) >= 0) {
+        const totalSeconds = Math.round(Number(cleanTime) * 24 * 3600);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        cleanTime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+      }
+      
+      // Try parsing with space
+      const dt = new Date(`${normalizedDate} ${cleanTime}`);
+      if (!isNaN(dt.getTime())) return dt;
+      
+      // Try parsing with T
+      const dtT = new Date(`${normalizedDate}T${cleanTime}`);
+      if (!isNaN(dtT.getTime())) return dtT;
+
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    const fetchScans = async () => {
+      const start = parseISO(startDateTime);
+      const end = parseISO(endDateTime);
+
+      if (dataSource === 'LOCAL') {
+        if (!fileHandle) return;
+        setLoading(true);
+        setErrorMsg(null);
+        try {
+          const file = await fileHandle.getFile();
+          const buffer = await file.arrayBuffer();
+          const workbook = XLSX.read(buffer);
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+          const mappedScans: ScanData[] = jsonData.map((row, index) => {
+            // Try to find columns by common names
+            const code = row.Barcode || row.barcode || row.Code || row.code || row.BARCODE || '';
+            const type = (row.Type || row.type || row.TYPE || 'IN').toUpperCase() as 'IN' | 'OUT';
+            const date = row.Date || row.date || row.DATE || '';
+            const time = row.Time || row.time || row.TIME || '';
+            const weight = row.Weight || row.weight || row.WEIGHT || '';
+            const area = row.Area || row.area || row.AREA || '';
+
+            return {
+              id: `local-${index}`,
+              code: String(code),
+              type: type === 'OUT' ? 'OUT' : 'IN',
+              date: String(date),
+              time: String(time),
+              weight: String(weight),
+              area: String(area)
+            };
+          });
+
+          // Filter by time range if dates are valid
+          const filteredLocal = mappedScans.filter(scan => {
+            const scanDateTime = parseScanDateTime(scan.date, scan.time);
+            if (!scanDateTime) return true;
+            return scanDateTime >= start && scanDateTime <= end;
+          });
+
+          filteredLocal.sort((a, b) => {
+            const dtA = parseScanDateTime(a.date, a.time);
+            const dtB = parseScanDateTime(b.date, b.time);
+            return (dtB?.getTime() || 0) - (dtA?.getTime() || 0);
+          });
+          setScans(filteredLocal);
+        } catch (error: any) {
+          console.error('Error reading local file:', error);
+          setErrorMsg(`Error reading local file: ${error.message}`);
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
       setLoading(true);
       setErrorMsg(null);
       try {
-        // For simplicity in this implementation, we fetch data for the date range
-        // and filter by time client-side.
+        // Fetch data for all days in the range
         const datesToFetch = [];
-        let currentDate = new Date(start);
-        while (currentDate <= end) {
+        let currentDate = startOfDay(start);
+        const endLimit = startOfDay(end);
+        
+        while (currentDate <= endLimit) {
           datesToFetch.push(format(currentDate, 'yyyy-MM-dd'));
-          currentDate.setDate(currentDate.getDate() + 1);
+          currentDate = addDays(currentDate, 1);
         }
 
         const allScans: ScanData[] = [];
@@ -84,38 +176,16 @@ export default function Summary() {
 
         // Filter by exact time range
         const filteredByTime = allScans.filter(scan => {
-          try {
-            // Try to parse date and time more robustly
-            let scanDate = scan.date;
-            // If date is in DD/MM/YYYY format, convert to YYYY-MM-DD
-            if (scanDate.includes('/')) {
-              const parts = scanDate.split('/');
-              if (parts[0].length === 2 && parts[2].length === 4) {
-                // Assume DD/MM/YYYY
-                scanDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
-              } else if (parts[0].length === 4) {
-                // Assume YYYY/MM/DD
-                scanDate = `${parts[0]}-${parts[1]}-${parts[2]}`;
-              }
-            }
-            
-            const scanDateTime = parseISO(`${scanDate}T${scan.time}`);
-            if (isNaN(scanDateTime.getTime())) {
-              console.warn('Invalid scan date/time:', scan.date, scan.time);
-              return true; // Include it anyway if we can't parse it, to be safe
-            }
-            return scanDateTime >= start && scanDateTime <= end;
-          } catch (e) {
-            console.error('Error parsing scan date:', scan, e);
-            return true;
-          }
+          const scanDateTime = parseScanDateTime(scan.date, scan.time);
+          if (!scanDateTime) return true;
+          return scanDateTime >= start && scanDateTime <= end;
         });
 
-        // Sort descending by date and time
+        // Sort descending by actual date object
         filteredByTime.sort((a, b) => {
-          const strA = `${a.date} ${a.time}`;
-          const strB = `${b.date} ${b.time}`;
-          return strB.localeCompare(strA);
+          const dtA = parseScanDateTime(a.date, a.time);
+          const dtB = parseScanDateTime(b.date, b.time);
+          return (dtB?.getTime() || 0) - (dtA?.getTime() || 0);
         });
 
         setScans(filteredByTime);
@@ -129,7 +199,19 @@ export default function Summary() {
     };
 
     fetchScans();
-  }, [startDateTime, endDateTime, refreshKey]);
+  }, [startDateTime, endDateTime, refreshKey, dataSource, fileHandle]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (autoRefresh) {
+      interval = setInterval(() => {
+        setRefreshKey(prev => prev + 1);
+      }, 3 * 60 * 1000); // 3 minutes
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [autoRefresh]);
 
   const filteredScans = scans.filter(scan => {
     const { rubberName, lotNumber } = getScanDetails(scan.code);
@@ -170,8 +252,67 @@ export default function Summary() {
     }
   };
 
+  const handleSelectLocalFile = async () => {
+    try {
+      // @ts-ignore - File System Access API
+      const [handle] = await window.showOpenFilePicker({
+        types: [
+          {
+            description: 'Excel Files',
+            accept: {
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+              'application/vnd.ms-excel': ['.xls']
+            }
+          }
+        ],
+        multiple: false
+      });
+      setFileHandle(handle);
+      setDataSource('LOCAL');
+      setRefreshKey(prev => prev + 1);
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        console.error('Error selecting file:', error);
+        alert('Failed to select file. Make sure your browser supports the File System Access API.');
+      }
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-4 space-y-6">
+      {/* Data Source Toggle */}
+      <div className="flex flex-col sm:flex-row gap-4 bg-white p-4 rounded-xl shadow-sm border">
+        <div className="flex-1">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Data Source</h3>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setDataSource('CLOUD')}
+              className={cn(
+                "flex-1 py-2 px-4 rounded-lg text-sm font-medium border transition-all",
+                dataSource === 'CLOUD' ? "bg-blue-50 border-blue-500 text-blue-700" : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+              )}
+            >
+              Google Sheets (Cloud)
+            </button>
+            <button 
+              onClick={handleSelectLocalFile}
+              className={cn(
+                "flex-1 py-2 px-4 rounded-lg text-sm font-medium border transition-all flex items-center justify-center gap-2",
+                dataSource === 'LOCAL' ? "bg-blue-50 border-blue-500 text-blue-700" : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+              )}
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              {fileHandle ? 'Local Excel (Active)' : 'Select Local Excel'}
+            </button>
+          </div>
+          {dataSource === 'LOCAL' && fileHandle && (
+            <p className="text-[10px] text-gray-500 mt-2 italic">
+              Connected to: {fileHandle.name}. App will re-read this file every 3 mins if auto-refresh is on.
+            </p>
+          )}
+        </div>
+      </div>
+
       {/* Date/Time Picker */}
       <div className="bg-white rounded-xl shadow-sm border p-4 flex flex-col sm:flex-row items-center gap-4">
         <div className="flex-1 w-full">
@@ -218,6 +359,19 @@ export default function Summary() {
           <Clock className={cn("w-4 h-4", loading && "animate-spin")} />
           {loading ? 'Refreshing...' : 'Refresh Data'}
         </button>
+      </div>
+
+      <div className="flex items-center gap-2 px-1">
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input 
+            type="checkbox" 
+            className="sr-only peer" 
+            checked={autoRefresh}
+            onChange={(e) => setAutoRefresh(e.target.checked)}
+          />
+          <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+          <span className="ml-3 text-xs font-medium text-gray-600">Auto-refresh (3 min)</span>
+        </label>
       </div>
 
       {/* Filters (only in List View) */}
