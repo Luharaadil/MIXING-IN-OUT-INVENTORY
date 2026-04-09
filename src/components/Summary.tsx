@@ -27,9 +27,10 @@ export default function Summary() {
   const [filterBatch, setFilterBatch] = useState('');
   const [filterArea, setFilterArea] = useState('');
   const [filterType, setFilterType] = useState<'' | 'IN' | 'OUT'>('');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const getScanDetails = (code: string) => {
-    const parts = code.split('-');
+    const parts = code.toUpperCase().split('-');
     const rubberName = parts[0] || '';
     const lotNumber = parts[1] || '';
     const batchStart = parseInt(parts[2] || '0');
@@ -83,8 +84,31 @@ export default function Summary() {
 
         // Filter by exact time range
         const filteredByTime = allScans.filter(scan => {
-          const scanDateTime = parseISO(`${scan.date}T${scan.time}`);
-          return scanDateTime >= start && scanDateTime <= end;
+          try {
+            // Try to parse date and time more robustly
+            let scanDate = scan.date;
+            // If date is in DD/MM/YYYY format, convert to YYYY-MM-DD
+            if (scanDate.includes('/')) {
+              const parts = scanDate.split('/');
+              if (parts[0].length === 2 && parts[2].length === 4) {
+                // Assume DD/MM/YYYY
+                scanDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
+              } else if (parts[0].length === 4) {
+                // Assume YYYY/MM/DD
+                scanDate = `${parts[0]}-${parts[1]}-${parts[2]}`;
+              }
+            }
+            
+            const scanDateTime = parseISO(`${scanDate}T${scan.time}`);
+            if (isNaN(scanDateTime.getTime())) {
+              console.warn('Invalid scan date/time:', scan.date, scan.time);
+              return true; // Include it anyway if we can't parse it, to be safe
+            }
+            return scanDateTime >= start && scanDateTime <= end;
+          } catch (e) {
+            console.error('Error parsing scan date:', scan, e);
+            return true;
+          }
         });
 
         // Sort descending by date and time
@@ -105,7 +129,7 @@ export default function Summary() {
     };
 
     fetchScans();
-  }, [startDateTime, endDateTime]);
+  }, [startDateTime, endDateTime, refreshKey]);
 
   const filteredScans = scans.filter(scan => {
     const { rubberName, lotNumber } = getScanDetails(scan.code);
@@ -171,44 +195,71 @@ export default function Summary() {
       </div>
 
       {/* View Toggle */}
-      <div className="flex bg-gray-200 p-1 rounded-lg">
+      <div className="flex flex-col sm:flex-row gap-4">
+        <div className="flex flex-1 bg-gray-200 p-1 rounded-lg">
+          <button 
+            onClick={() => setViewMode('LIST')}
+            className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'LIST' ? "bg-white shadow text-blue-600" : "text-gray-600")}
+          >
+            <List className="w-4 h-4" /> List View
+          </button>
+          <button 
+            onClick={() => setViewMode('SUMMARY')}
+            className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'SUMMARY' ? "bg-white shadow text-blue-600" : "text-gray-600")}
+          >
+            <BarChart3 className="w-4 h-4" /> Rubber Summary
+          </button>
+        </div>
         <button 
-          onClick={() => setViewMode('LIST')}
-          className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'LIST' ? "bg-white shadow text-blue-600" : "text-gray-600")}
+          onClick={() => setRefreshKey(prev => prev + 1)}
+          disabled={loading}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
         >
-          <List className="w-4 h-4" /> List View
-        </button>
-        <button 
-          onClick={() => setViewMode('SUMMARY')}
-          className={cn("flex-1 py-2 text-sm font-medium rounded-md flex items-center justify-center gap-2", viewMode === 'SUMMARY' ? "bg-white shadow text-blue-600" : "text-gray-600")}
-        >
-          <BarChart3 className="w-4 h-4" /> Rubber Summary
+          <Clock className={cn("w-4 h-4", loading && "animate-spin")} />
+          {loading ? 'Refreshing...' : 'Refresh Data'}
         </button>
       </div>
 
       {/* Filters (only in List View) */}
       {viewMode === 'LIST' && (
-        <div className="bg-white rounded-xl shadow-sm border p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {/* ... filters ... */}
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Type</label>
-            <select value={filterType} onChange={(e) => setFilterType(e.target.value as '' | 'IN' | 'OUT')} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
-              <option value="">All</option>
-              <option value="IN">IN</option>
-              <option value="OUT">OUT</option>
-            </select>
+        <div className="bg-white rounded-xl shadow-sm border p-4 space-y-4">
+          <div className="flex justify-between items-center">
+            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+              <Filter className="w-4 h-4" /> Filters
+            </h3>
+            <button 
+              onClick={() => {
+                setFilterRubber('');
+                setFilterBatch('');
+                setFilterArea('');
+                setFilterType('');
+              }}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              Clear All Filters
+            </button>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Rubber</label>
-            <input type="text" value={filterRubber} onChange={(e) => setFilterRubber(e.target.value)} placeholder="e.g. 0022NP" className="w-full px-3 py-2 border rounded-lg text-sm" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Batch</label>
-            <input type="text" value={filterBatch} onChange={(e) => setFilterBatch(e.target.value)} placeholder="e.g. 2903266307" className="w-full px-3 py-2 border rounded-lg text-sm" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Filter Area</label>
-            <input type="text" value={filterArea} onChange={(e) => setFilterArea(e.target.value)} placeholder="e.g. M-B-1" className="w-full px-3 py-2 border rounded-lg text-sm" />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Filter Type</label>
+              <select value={filterType} onChange={(e) => setFilterType(e.target.value as '' | 'IN' | 'OUT')} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
+                <option value="">All</option>
+                <option value="IN">IN</option>
+                <option value="OUT">OUT</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Filter Rubber</label>
+              <input type="text" value={filterRubber} onChange={(e) => setFilterRubber(e.target.value)} placeholder="e.g. 0022NP" className="w-full px-3 py-2 border rounded-lg text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Filter Batch</label>
+              <input type="text" value={filterBatch} onChange={(e) => setFilterBatch(e.target.value)} placeholder="e.g. 2903266307" className="w-full px-3 py-2 border rounded-lg text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Filter Area</label>
+              <input type="text" value={filterArea} onChange={(e) => setFilterArea(e.target.value)} placeholder="e.g. M-B-1" className="w-full px-3 py-2 border rounded-lg text-sm" />
+            </div>
           </div>
         </div>
       )}

@@ -38,7 +38,11 @@ export default function Scanner() {
         const response = await fetch(`${SCRIPT_URL}?date=${dateStr}`);
         if (response.ok) {
           const data = await response.json();
-          setTodayScans(data.scans || []);
+          const normalizedScans = (data.scans || []).map((s: any) => ({
+            ...s,
+            code: (s.code || '').toUpperCase()
+          }));
+          setTodayScans(normalizedScans);
         }
       } catch (error) {
         console.error('Failed to fetch today scans:', error);
@@ -83,7 +87,8 @@ export default function Scanner() {
   }, [scanType, weight, area]);
 
   const handleScan = async (code: string) => {
-    if (!code.trim() || isSubmitting || scanModal) return false;
+    const uppercasedCode = code.trim().toUpperCase();
+    if (!uppercasedCode || isSubmitting || scanModal) return false;
 
     const currentType = scanTypeRef.current;
     const currentWeight = weightRef.current;
@@ -100,9 +105,9 @@ export default function Scanner() {
       }
     }
 
-    const isDuplicate = todayScans.some(s => s.code === code.trim() && s.type === currentType);
+    const isDuplicate = todayScans.some(s => s.code === uppercasedCode && s.type === currentType);
     if (isDuplicate) {
-      setScanModal({ message: `Barcode ${code.trim()} is already marked as ${currentType}.`, isError: true });
+      setScanModal({ message: `Barcode ${uppercasedCode} is already marked as ${currentType}.`, isError: true });
       return false;
     }
 
@@ -123,7 +128,7 @@ export default function Scanner() {
           date: dateStr,
           time: timeStr,
           type: currentType,
-          code: code.trim(),
+          code: uppercasedCode,
           weight: currentWeight,
           area: currentArea
         }),
@@ -133,16 +138,16 @@ export default function Scanner() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       
-      setTodayScans(prev => [...prev, { code: code.trim(), type: currentType }]);
+      setTodayScans(prev => [...prev, { code: uppercasedCode, type: currentType }]);
       
       if (scannerMode === 'CAMERA') {
         const msg = currentType === 'IN' 
-          ? `${code.trim()} and ${currentWeight || '0'} of this material in inward in this ${currentArea || 'area'} successfully`
-          : `out ${code.trim()} successful`;
+          ? `${uppercasedCode} and ${currentWeight || '0'} of this material in inward in this ${currentArea || 'area'} successfully`
+          : `out ${uppercasedCode} successful`;
         setScanModal({ message: msg, isError: false });
       } else {
         setLastScan({ 
-          code: code.trim(), 
+          code: uppercasedCode, 
           type: currentType, 
           time: now,
           weight: currentWeight,
